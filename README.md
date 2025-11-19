@@ -6,12 +6,20 @@ This repository contains a complete Python implementation of Simulation Study 1 
 
 The simulation demonstrates successful EEG neurofeedback learning through a spiking neural network model with reward-modulated plasticity.
 
+## Author
+
+**Stanislav Revko**  
+PhD Student  
+Lesya Ukrainka Volyn National University
+
+This implementation is part of a PhD dissertation research project on computational modeling of neurofeedback processes based on interactions in the thalamus-striatum-hippocampus-frontal-occipital cortex system.
+
 ## Overview
 
-The simulation implements a three-phase neurofeedback training protocol:
+The simulation implements a multi-phase neurofeedback training protocol:
 
 1. **Baseline (5 minutes)**: Record EEG to establish peak alpha frequency (PAF) and baseline statistics
-2. **Training (1 minute)**: Neurofeedback learning with reward-modulated striatal plasticity
+2. **Training (5 sessions × 5 minutes each)**: Neurofeedback learning with reward-modulated striatal plasticity across multiple training sessions
 3. **Post-training (5 minutes)**: Measure training effects on EEG spectral properties
 
 ## Components
@@ -54,6 +62,38 @@ The simulation implements a three-phase neurofeedback training protocol:
 - Command-line interface
 - Visualization generation (Figures 4 & 5)
 - Results saving (plots, data files)
+
+## Quick Start
+
+Get up and running in minutes:
+
+```bash
+# 1. Clone the repository
+git clone git@github.com-stanrevko:stanrevko/davelaar_model.git
+cd davelaar_model
+
+# 2. Create virtual environment
+python3 -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# 3. Install dependencies
+pip install -r requirements.txt
+
+# 4. Run simulation (default: 5 training sessions × 5 minutes each)
+python run_simulation.py
+
+# 5. View results
+# Results are saved in results/ directory:
+#   - simulation_results.png: Comprehensive visualization
+#   - results.npz: All simulation data
+#   - learning_curve.csv: Learning progress over time
+```
+
+The simulation will run with default parameters:
+- Baseline: 5 minutes
+- Training: 5 sessions × 5 minutes each (25 minutes total)
+- Post-training: 5 minutes
+- Total duration: ~35 minutes
 
 ## Installation
 
@@ -106,9 +146,10 @@ python run_simulation.py --help
 Options:
 - `--seed SEED`: Random seed for reproducibility (default: 42)
 - `--output DIR`: Output directory for results (default: results/)
-- `--baseline-duration MS`: Baseline duration in milliseconds (default: 300000 = 5 min)
-- `--training-duration MS`: Training duration in milliseconds (default: 60000 = 1 min)
-- `--post-duration MS`: Post-training duration in milliseconds (default: 300000 = 5 min)
+- `--baseline-duration SEC`: Baseline duration in seconds (default: 300 = 5 min)
+- `--training-duration SEC`: Training duration per session in seconds (default: 300 = 5 min)
+- `--n-training-phases N`: Number of training sessions (default: 5)
+- `--post-duration SEC`: Post-training duration in seconds (default: 300 = 5 min)
 
 ### Example
 
@@ -123,7 +164,10 @@ python run_simulation.py --seed 123
 python run_simulation.py --output my_results/
 
 # Run with shorter durations for testing
-python run_simulation.py --baseline-duration 60000 --training-duration 10000 --post-duration 60000
+python run_simulation.py --baseline-duration 60 --training-duration 60 --n-training-phases 2 --post-duration 60
+
+# Run with custom number of training sessions
+python run_simulation.py --n-training-phases 10 --training-duration 300
 ```
 
 ## Output Files
@@ -217,16 +261,19 @@ Baseline established:
   UAF band: [10.34, 12.34] Hz
   Baseline UAF power: 45.67 ± 8.23
 
-Phase 2: Training
-  Duration: 1.0 minutes
-Training: 100%|████████████████████| 60000/60000
+Phase 2: Training (5 sessions × 5 minutes)
+  Session 1/5: 100%|████████████████████| 300000/300000
+  Session 2/5: 100%|████████████████████| 300000/300000
+  Session 3/5: 100%|████████████████████| 300000/300000
+  Session 4/5: 100%|████████████████████| 300000/300000
+  Session 5/5: 100%|████████████████████| 300000/300000
 
 Training results:
   Initial P(target): 0.0010
   Final P(target): 0.3456
   Increase: 345.6×
   Feedback rate: 42.5%
-  Weight updates: 600
+  Weight updates: 3000 (600 per session)
 
 Phase 3: Post-Training
   Duration: 5.0 minutes
@@ -314,7 +361,7 @@ The pure Python/NumPy implementation is optimized for speed:
 
 For faster testing, use shorter durations:
 ```bash
-python run_simulation.py --baseline-duration 30000 --training-duration 10000 --post-duration 30000
+python run_simulation.py --baseline-duration 60 --training-duration 60 --n-training-phases 2 --post-duration 60
 ```
 
 The simulation can still be slow for full-length runs due to:
@@ -351,7 +398,11 @@ If target probability doesn't increase:
 
 This code is provided for research and educational purposes. Please cite the original paper if you use this implementation in your work.
 
-## Author
+## Contact
 
-Generated from specification document for Davelaar (2018) Simulation Study 1.
+For questions or issues, please open an issue on GitHub or contact:
+
+**Stanislav Revko**  
+Lesya Ukrainka Volyn National University  
+GitHub: [@stanrevko](https://github.com/stanrevko)
 
