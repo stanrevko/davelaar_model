@@ -9,7 +9,7 @@ Reference:
     Davelaar, E.J. (2018). Mechanisms of Neurofeedback: A Computation-theoretic Approach.
     Neuroscience, 378, 175-188.
 
-Author: Generated from specification
+Author: Stanislav Revko (stanislav.revko@gmail.com)
 """
 
 import numpy as np
