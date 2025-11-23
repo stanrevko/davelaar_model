@@ -320,20 +320,19 @@ class NeurofeedbackSimulation:
             print("=" * 70)
             print("PHASE 1: BASELINE RECORDING")
             print("=" * 70)
-        
-        baseline_eeg = []
-        
+
+        # Pre-allocate array for better performance
+        baseline_eeg = np.empty(baseline_duration_ms, dtype=np.float64)
+
         for t in tqdm(
             range(baseline_duration_ms),
             desc="Baseline",
             disable=not verbose,
-            unit="ms"
+            unit="ms",
+            mininterval=0.1
         ):
             # Generate EEG without modulation (no feedback, no learning)
-            eeg_sample = self.eeg_generator.step(thalamic_modulation=0.0)
-            baseline_eeg.append(eeg_sample)
-        
-        baseline_eeg = np.array(baseline_eeg)
+            baseline_eeg[t] = self.eeg_generator.step(thalamic_modulation=0.0)
         
         # Establish baseline statistics
         paf = self.analyzer.find_peak_alpha_frequency(baseline_eeg)
@@ -365,12 +364,17 @@ class NeurofeedbackSimulation:
             window_size=1024,
             n_units=self.striatum.n_units
         )
-        
-        training_eeg = []
-        feedback_history = []
+
+        # Pre-allocate arrays for better performance
+        total_training_duration_ms = n_training_phases * training_duration_ms
+        training_eeg = np.empty(total_training_duration_ms, dtype=np.float64)
+
+        # Estimate number of feedback updates
+        max_updates = (total_training_duration_ms // update_interval_ms) + 1
+        feedback_history = []  # Keep as list, append is fine for small counts
         target_prob_history = []
         uaf_power_history = []
-        
+
         # Track initial target probability
         initial_target_prob = self.striatum.get_target_probability()
         target_prob_history.append(initial_target_prob)
@@ -379,31 +383,35 @@ class NeurofeedbackSimulation:
         total_n_positive_feedback = 0
         
         # Run multiple training phases
+        training_idx = 0  # Index for pre-allocated training_eeg array
+
         for phase in range(n_training_phases):
             if verbose and n_training_phases > 1:
                 print(f"\nPhase {phase + 1}/{n_training_phases}: Training Phase {phase + 1}")
                 print(f"  Duration: {training_duration:.1f} seconds ({training_duration/60:.1f} minutes)")
-            
+
             phase_initial_prob = self.striatum.get_target_probability()
             phase_n_updates = 0
             phase_n_positive_feedback = 0
-            
+
             for t in tqdm(
                 range(training_duration_ms),
                 desc=f"Training Phase {phase + 1}" if n_training_phases > 1 else "Training",
                 disable=not verbose,
-                unit="ms"
+                unit="ms",
+                mininterval=0.1
             ):
                 # Sample striatum
                 active_units = self.striatum.sample()
                 target_active = self.striatum.is_target_active(active_units)
                 self.activation_buffer.add(active_units)
-                
+
                 # Generate EEG with thalamic modulation
                 modulation = 1.0 if target_active else 0.0
                 eeg_sample = self.eeg_generator.step(thalamic_modulation=modulation)
-                training_eeg.append(eeg_sample)
-                
+                training_eeg[training_idx] = eeg_sample
+                training_idx += 1
+
                 # Add to analyzer buffer
                 self.analyzer.add_sample(eeg_sample)
                 
@@ -437,10 +445,10 @@ class NeurofeedbackSimulation:
                     
                     phase_n_updates += 1
                     total_n_updates += 1
-            
+
             phase_final_prob = self.striatum.get_target_probability()
             phase_feedback_rate = phase_n_positive_feedback / max(phase_n_updates, 1)
-            
+
             if verbose and n_training_phases > 1:
                 print(f"\nTraining Phase {phase + 1} results:")
                 print(f"  Initial P(target): {phase_initial_prob:.4f}")
@@ -448,8 +456,8 @@ class NeurofeedbackSimulation:
                 print(f"  Increase: {phase_final_prob / max(phase_initial_prob, 1e-10):.1f}×")
                 print(f"  Feedback rate: {phase_feedback_rate:.1%}")
                 print(f"  Weight updates: {phase_n_updates}")
-        
-        training_eeg = np.array(training_eeg)
+
+        # training_eeg already pre-allocated as numpy array
         final_target_prob = self.striatum.get_target_probability()
         overall_feedback_rate = total_n_positive_feedback / max(total_n_updates, 1)
         
@@ -487,26 +495,25 @@ class NeurofeedbackSimulation:
             print("=" * 70)
             print("PHASE 3: POST-TRAINING MEASUREMENT")
             print("=" * 70)
-        
-        post_eeg = []
-        
+
+        # Pre-allocate array for better performance
+        post_eeg = np.empty(post_duration_ms, dtype=np.float64)
+
         for t in tqdm(
             range(post_duration_ms),
             desc="Post-training",
             disable=not verbose,
-            unit="ms"
+            unit="ms",
+            mininterval=0.1
         ):
             # Continue sampling striatum (with learned weights)
             active_units = self.striatum.sample()
             target_active = self.striatum.is_target_active(active_units)
-            
+
             # Apply modulation to see effects of learning
             # but do NOT update weights (no learning in post phase)
             modulation = 1.0 if target_active else 0.0
-            eeg_sample = self.eeg_generator.step(thalamic_modulation=modulation)
-            post_eeg.append(eeg_sample)
-        
-        post_eeg = np.array(post_eeg)
+            post_eeg[t] = self.eeg_generator.step(thalamic_modulation=modulation)
         
         if verbose:
             print("✓ Post-training recording complete\n")

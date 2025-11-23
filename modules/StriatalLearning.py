@@ -285,25 +285,24 @@ class StriatalLearning:
             # ============================================================
             # NEGATIVE FEEDBACK: Weaken active units
             # ============================================================
-            # All active units are weakened by the same amount
-            # Δw_i = -η × (mean_activation / window_size)
-            
-            # Compute mean activation count among active units
-            mean_activation = np.mean(activation_counts[active_mask])
-            
-            # Compute update magnitude
-            update_magnitude = self.learning_rate * (mean_activation / self.window_size)
-            
-            # Apply update only to active units
-            self.weights[active_mask] -= update_magnitude
+            # Per-unit decay proportional to its own activation frequency
+            # Δw_i = -η × (count_i / window_size)
+            decay = self.learning_rate * (activation_counts / self.window_size)
+            self.weights -= decay
             
             self._negative_feedbacks += 1
         
         # ============================================================
-        # POST-UPDATE: Ensure non-negativity
+        # POST-UPDATE: Ensure non-negativity and renormalize
         # ============================================================
         # Weights must remain non-negative for probability interpretation
         self.weights = np.maximum(self.weights, 1e-10)
+        
+        # Renormalize so weights represent a proper distribution; sampling
+        # still scales by n_active_expected to target ~10 active MSNs.
+        weight_sum = np.sum(self.weights)
+        if weight_sum > 0:
+            self.weights /= weight_sum
         
         # Track updates
         self._total_updates += 1

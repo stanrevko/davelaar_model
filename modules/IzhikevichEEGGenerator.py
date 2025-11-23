@@ -15,8 +15,107 @@ Author: Stanislav Revko (stanislav.revko@gmail.com)
 import numpy as np
 from typing import Optional, Tuple
 
-# Time step in milliseconds
-DT_MS = 1.0
+# Try to import numba for JIT compilation (optional dependency)
+try:
+    from numba import jit
+    NUMBA_AVAILABLE = True
+except ImportError:
+    NUMBA_AVAILABLE = False
+    # Create dummy decorator if numba not available
+    def jit(*args, **kwargs):
+        def decorator(func):
+            return func
+        return decorator
+
+# Time step in milliseconds (two half-steps per millisecond for stability)
+DT_MS = 0.5
+
+
+# JIT-compiled helper functions for performance
+@jit(nopython=True, cache=True)
+def _compute_synaptic_input_exc(w_ee, w_ie, spikes_exc, spikes_inh):
+    """Compute synaptic input to excitatory neurons."""
+    I_syn_ee = np.zeros(w_ee.shape[0])
+    I_syn_ie = np.zeros(w_ie.shape[1])
+
+    if np.any(spikes_exc):
+        for i in range(w_ee.shape[0]):
+            for j in range(w_ee.shape[1]):
+                if spikes_exc[j]:
+                    I_syn_ee[i] += w_ee[i, j]
+
+    if np.any(spikes_inh):
+        for i in range(w_ie.shape[1]):
+            for j in range(w_ie.shape[0]):
+                if spikes_inh[j]:
+                    I_syn_ie[i] += w_ie[j, i]
+
+    return I_syn_ee, I_syn_ie
+
+
+@jit(nopython=True, cache=True)
+def _compute_synaptic_input_inh(w_ei, w_ii, spikes_exc, spikes_inh):
+    """Compute synaptic input to inhibitory neurons."""
+    I_syn_ei = np.zeros(w_ei.shape[1])
+    I_syn_ii = np.zeros(w_ii.shape[0])
+
+    if np.any(spikes_exc):
+        for i in range(w_ei.shape[1]):
+            for j in range(w_ei.shape[0]):
+                if spikes_exc[j]:
+                    I_syn_ei[i] += w_ei[j, i]
+
+    if np.any(spikes_inh):
+        for i in range(w_ii.shape[0]):
+            for j in range(w_ii.shape[1]):
+                if spikes_inh[j]:
+                    I_syn_ii[i] += w_ii[i, j]
+
+    return I_syn_ei, I_syn_ii
+
+
+@jit(nopython=True, cache=True)
+def _update_neurons_exc(v, u, I_total, a, b, c, d, dt):
+    """Update excitatory neurons (one half-step)."""
+    # Compute derivatives
+    dv = (0.04 * v**2 + 5 * v + 140 - u + I_total) * dt
+    du = a * (b * v - u) * dt
+
+    # Update state
+    v_new = v + dv
+    u_new = u + du
+
+    # Handle spikes
+    spikes = v_new >= 30
+    if np.any(spikes):
+        for i in range(len(v_new)):
+            if spikes[i]:
+                v_new[i] = c[i]
+                u_new[i] += d[i]
+
+    return v_new, u_new, spikes
+
+
+@jit(nopython=True, cache=True)
+def _update_neurons_inh(v, u, I_total, a, b, c, d, dt):
+    """Update inhibitory neurons (one half-step)."""
+    # Compute derivatives
+    dv = (0.04 * v**2 + 5 * v + 140 - u + I_total) * dt
+    du = a * (b * v - u) * dt
+
+    # Update state
+    v_new = v + dv
+    u_new = u + du
+
+    # Handle spikes
+    spikes = v_new >= 30
+    if np.any(spikes):
+        for i in range(len(v_new)):
+            if spikes[i]:
+                v_new[i] = c[i]
+                u_new[i] += d[i]
+
+    return v_new, u_new, spikes
 
 
 class IzhikevichEEGGenerator:
@@ -56,22 +155,25 @@ class IzhikevichEEGGenerator:
         n_exc: int = 800,
         n_inh: int = 200,
         random_seed: Optional[int] = None,
-        measurement_noise_std: float = 0.0
+        measurement_noise_std: float = 0.0,
+        track_spikes: bool = False
     ):
         """
         Initialize the Izhikevich EEG generator network.
-        
+
         Args:
             n_exc: Number of excitatory neurons
             n_inh: Number of inhibitory neurons
             random_seed: Random seed for reproducibility (None for random)
             measurement_noise_std: Standard deviation of additive white Gaussian noise
                                  added to EEG signal (default: 0.0, no noise)
+            track_spikes: Whether to track spike times (default: False for performance)
         """
         self.n_exc = n_exc
         self.n_inh = n_inh
         self.n_total = n_exc + n_inh
         self.measurement_noise_std = measurement_noise_std
+        self.track_spikes = track_spikes
         
         # Set random seed
         if random_seed is not None:
@@ -127,8 +229,12 @@ class IzhikevichEEGGenerator:
         self.w_ii = -np.random.uniform(0, 1.0, size=(n_inh, n_inh))
         
         # Spike history for tracking (optional, for debugging)
-        self.spike_history_exc = []
-        self.spike_history_inh = []
+        if self.track_spikes:
+            self.spike_history_exc = []
+            self.spike_history_inh = []
+        else:
+            self.spike_history_exc = None
+            self.spike_history_inh = None
         self.current_time = 0.0
         
     def step(
@@ -148,7 +254,7 @@ class IzhikevichEEGGenerator:
         Returns:
             Current EEG signal value
         """
-        # Set thalamic input (Gaussian noise)
+        # Set thalamic input (Gaussian noise) once per millisecond and reuse for the two half-steps
         if I_exc is not None:
             # Use provided input currents for excitatory neurons
             if len(I_exc) != self.n_exc:
@@ -162,92 +268,56 @@ class IzhikevichEEGGenerator:
         
         I_thalamic_inh = np.random.normal(2.0, 1.0, self.n_inh)
         
-        # Detect spikes (before updating)
-        spikes_exc = self.v_exc >= 30
-        spikes_inh = self.v_inh >= 30
+        # Two half-step (0.5 ms) updates for better numerical stability (Izhikevich recommendation)
+        for _ in range(2):
+            # Detect spikes (before updating)
+            spikes_exc = self.v_exc >= 30
+            spikes_inh = self.v_inh >= 30
+
+            # Compute synaptic input from spikes (JIT-compiled for speed)
+            I_syn_ee, I_syn_ie = _compute_synaptic_input_exc(
+                self.w_ee, self.w_ie, spikes_exc, spikes_inh
+            )
+            I_syn_ei, I_syn_ii = _compute_synaptic_input_inh(
+                self.w_ei, self.w_ii, spikes_exc, spikes_inh
+            )
+
+            # Total input current
+            I_exc_total = I_thalamic_exc + I_syn_ee + I_syn_ie
+            I_inh_total = I_thalamic_inh + I_syn_ei + I_syn_ii
+
+            # Update neurons (JIT-compiled for speed)
+            self.v_exc, self.u_exc, spike_mask_exc = _update_neurons_exc(
+                self.v_exc, self.u_exc, I_exc_total,
+                self.a_exc, self.b_exc, self.c_exc, self.d_exc, DT_MS
+            )
+            self.v_inh, self.u_inh, spike_mask_inh = _update_neurons_inh(
+                self.v_inh, self.u_inh, I_inh_total,
+                self.a_inh, self.b_inh, self.c_inh, self.d_inh, DT_MS
+            )
+
+            # Track spikes if enabled
+            if self.track_spikes:
+                if np.any(spike_mask_exc):
+                    spike_indices = np.where(spike_mask_exc)[0]
+                    for idx in spike_indices:
+                        self.spike_history_exc.append((self.current_time, idx))
+                if np.any(spike_mask_inh):
+                    spike_indices = np.where(spike_mask_inh)[0]
+                    for idx in spike_indices:
+                        self.spike_history_inh.append((self.current_time, idx))
+
+            # Advance simulation time by half-step
+            self.current_time += DT_MS
         
-        # Compute synaptic input from spikes
-        # w_ee[i,j] = weight from excitatory neuron j to excitatory neuron i
-        # If neuron j spikes, add w_ee[:,j] to all post-synaptic neurons
-        
-        # E -> E: sum over pre-synaptic neurons that spiked
-        I_syn_ee = np.zeros(self.n_exc)
-        if np.any(spikes_exc):
-            # For each post-synaptic neuron i, sum weights from spiking pre-synaptic neurons
-            I_syn_ee = np.sum(self.w_ee[:, spikes_exc], axis=1)
-        
-        # E -> I: excitatory to inhibitory
-        I_syn_ei = np.zeros(self.n_inh)
-        if np.any(spikes_exc):
-            # w_ei[i,j] = weight from excitatory neuron j to inhibitory neuron i
-            I_syn_ei = np.sum(self.w_ei[:, spikes_exc], axis=1)
-        
-        # I -> E: inhibitory to excitatory (negative weights)
-        I_syn_ie = np.zeros(self.n_exc)
-        if np.any(spikes_inh):
-            # w_ie[i,j] = weight from inhibitory neuron j to excitatory neuron i
-            I_syn_ie = np.sum(self.w_ie[:, spikes_inh], axis=1)
-        
-        # I -> I: inhibitory to inhibitory (negative weights)
-        I_syn_ii = np.zeros(self.n_inh)
-        if np.any(spikes_inh):
-            # w_ii[i,j] = weight from inhibitory neuron j to inhibitory neuron i
-            I_syn_ii = np.sum(self.w_ii[:, spikes_inh], axis=1)
-        
-        # Total input current
-        I_exc = I_thalamic_exc + I_syn_ee + I_syn_ie
-        I_inh = I_thalamic_inh + I_syn_ei + I_syn_ii
-        
-        # Update excitatory neurons using Euler method
-        # dv/dt = 0.04*v² + 5*v + 140 - u + I
-        dv_exc = (0.04 * self.v_exc**2 + 5 * self.v_exc + 140 - self.u_exc + I_exc) * DT_MS
-        # du/dt = a*(b*v - u)
-        du_exc = self.a_exc * (self.b_exc * self.v_exc - self.u_exc) * DT_MS
-        
-        self.v_exc += dv_exc
-        self.u_exc += du_exc
-        
-        # Update inhibitory neurons
-        dv_inh = (0.04 * self.v_inh**2 + 5 * self.v_inh + 140 - self.u_inh + I_inh) * DT_MS
-        du_inh = self.a_inh * (self.b_inh * self.v_inh - self.u_inh) * DT_MS
-        
-        self.v_inh += dv_inh
-        self.u_inh += du_inh
-        
-        # Handle spikes: reset membrane potential and recovery variable
-        # Excitatory
-        spike_mask_exc = self.v_exc >= 30
-        if np.any(spike_mask_exc):
-            self.v_exc[spike_mask_exc] = self.c_exc[spike_mask_exc]
-            self.u_exc[spike_mask_exc] += self.d_exc[spike_mask_exc]
-            # Record spikes
-            spike_indices = np.where(spike_mask_exc)[0]
-            for idx in spike_indices:
-                self.spike_history_exc.append((self.current_time, idx))
-        
-        # Inhibitory
-        spike_mask_inh = self.v_inh >= 30
-        if np.any(spike_mask_inh):
-            self.v_inh[spike_mask_inh] = self.c_inh[spike_mask_inh]
-            self.u_inh[spike_mask_inh] += self.d_inh[spike_mask_inh]
-            # Record spikes
-            spike_indices = np.where(spike_mask_inh)[0]
-            for idx in spike_indices:
-                self.spike_history_inh.append((self.current_time, idx))
-        
-        # Compute EEG signal: low-pass filtered sum of excitatory potentials
-        # EEG[t] = 0.9 * EEG[t-1] + 0.1 * sum(v_exc)
+        # Compute EEG signal once per millisecond: low-pass filtered sum of excitatory potentials
         sum_v_exc = np.sum(self.v_exc)
         self.eeg_signal = 0.9 * self.eeg_signal + 0.1 * sum_v_exc
         
         # Add measurement noise (white Gaussian noise) if specified
-        # This models sensor/measurement artifacts in real EEG recordings
         if self.measurement_noise_std > 0:
             measurement_noise = np.random.normal(0.0, self.measurement_noise_std)
             self.eeg_signal += measurement_noise
-        
-        # Update time
-        self.current_time += DT_MS
         
         return self.eeg_signal
     
@@ -266,8 +336,9 @@ class IzhikevichEEGGenerator:
             self.step()
         
         # Clear spike history from warm-up
-        self.spike_history_exc = []
-        self.spike_history_inh = []
+        if self.track_spikes:
+            self.spike_history_exc = []
+            self.spike_history_inh = []
         self.current_time = 0.0
     
     def get_eeg_signal(self) -> float:
@@ -287,16 +358,20 @@ class IzhikevichEEGGenerator:
         self.u_inh = self.u_inh_init.copy()
         self.eeg_signal = 0.0
         self.current_time = 0.0
-        self.spike_history_exc = []
-        self.spike_history_inh = []
+        if self.track_spikes:
+            self.spike_history_exc = []
+            self.spike_history_inh = []
         
     def get_spike_times(self) -> Tuple[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray]]:
         """
         Get spike times for excitatory and inhibitory neurons.
-        
+
         Returns:
             Tuple of ((exc_times, exc_indices), (inh_times, inh_indices))
         """
+        if not self.track_spikes:
+            raise RuntimeError("Spike tracking is disabled. Enable with track_spikes=True")
+
         if len(self.spike_history_exc) == 0:
             exc_times = np.array([])
             exc_indices = np.array([])

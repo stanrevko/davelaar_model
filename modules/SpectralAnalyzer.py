@@ -439,43 +439,45 @@ class SpectralAnalyzer:
                 RuntimeWarning
             )
         
-        # Compute UAF power for multiple windows in baseline
-        baseline_uaf_values = []
-        
-        # Slide window through baseline signal
-        step_size = self.update_interval  # ms (typically 100)
-        n_windows = (len(eeg_signal) - self.window_size) // step_size + 1
-        
-        if n_windows < 10:
-            warnings.warn(
-                f"Only {n_windows} windows available in baseline. "
-                f"Consider longer baseline recording for better statistics.",
-                RuntimeWarning
+        # Preprocess entire signal once
+        eeg_preprocessed = self._preprocess_signal(eeg_signal)
+
+        # Use scipy.signal.welch for efficient computation of PSD over sliding windows
+        # welch computes averaged periodogram with overlapping segments
+        noverlap = self.window_size - self.update_interval
+        freqs_welch, psd_segments = sp_signal.welch(
+            eeg_preprocessed,
+            fs=self.sampling_rate,
+            window='hamming',
+            nperseg=self.window_size,
+            noverlap=noverlap,
+            return_onesided=True,
+            scaling='density',
+            average='mean'
+        )
+
+        # For getting individual window UAF values, we need to compute them separately
+        # Use spectrogram for time-resolved spectrum
+        freqs_spec, times_spec, Sxx = sp_signal.spectrogram(
+            eeg_preprocessed,
+            fs=self.sampling_rate,
+            window='hamming',
+            nperseg=self.window_size,
+            noverlap=noverlap,
+            mode='psd',
+            scaling='density'
+        )
+
+        # Find UAF band indices in frequency array
+        band_mask = (freqs_spec >= self.uaf_band[0]) & (freqs_spec <= self.uaf_band[1])
+
+        if not np.any(band_mask):
+            raise ValueError(
+                f"No frequencies found in UAF band {self.uaf_band} Hz"
             )
-        
-        for i in range(0, len(eeg_signal) - self.window_size + 1, step_size):
-            window = eeg_signal[i:i + self.window_size]
-            
-            # Preprocess window
-            window = self._preprocess_signal(window)
-            
-            # Apply Hamming window
-            windowed = window * self.hamming_window
-            
-            # Compute FFT
-            fft_result = np.fft.rfft(windowed)
-            psd = np.abs(fft_result)**2 / self.window_size
-            
-            # Compute band power in UAF
-            band_mask = (
-                (self.freqs >= self.uaf_band[0]) & 
-                (self.freqs <= self.uaf_band[1])
-            )
-            
-            if np.any(band_mask):
-                # Mean PSD in UAF band
-                uaf_power = np.mean(psd[band_mask])
-                baseline_uaf_values.append(uaf_power)
+
+        # Compute mean power in UAF band for each time window
+        baseline_uaf_values = np.mean(Sxx[band_mask, :], axis=0)
         
         if len(baseline_uaf_values) == 0:
             raise ValueError(
@@ -629,39 +631,41 @@ class SpectralAnalyzer:
             )
         
         eeg_signal = np.asarray(eeg_signal).flatten()
-        
+
         if len(eeg_signal) < self.window_size:
             raise ValueError(
                 f"Signal length {len(eeg_signal)} < window_size ({self.window_size})"
             )
-        
-        uaf_values = []
-        step_size = self.update_interval
-        
-        for i in range(0, len(eeg_signal) - self.window_size + 1, step_size):
-            window = eeg_signal[i:i + self.window_size]
-            
-            # Preprocess window
-            window = self._preprocess_signal(window)
-            
-            # Apply Hamming window
-            windowed = window * self.hamming_window
-            
-            # Compute FFT
-            fft_result = np.fft.rfft(windowed)
-            psd = np.abs(fft_result)**2 / self.window_size
-            
-            # Compute band power in UAF
-            band_mask = (
-                (self.freqs >= self.uaf_band[0]) & 
-                (self.freqs <= self.uaf_band[1])
+
+        # Preprocess entire signal once
+        eeg_preprocessed = self._preprocess_signal(eeg_signal)
+
+        # Use spectrogram for efficient time-resolved spectrum computation
+        noverlap = self.window_size - self.update_interval
+        freqs_spec, times_spec, Sxx = sp_signal.spectrogram(
+            eeg_preprocessed,
+            fs=self.sampling_rate,
+            window='hamming',
+            nperseg=self.window_size,
+            noverlap=noverlap,
+            mode='psd',
+            scaling='density'
+        )
+
+        # Find UAF band indices in frequency array
+        band_mask = (freqs_spec >= self.uaf_band[0]) & (freqs_spec <= self.uaf_band[1])
+
+        if not np.any(band_mask):
+            warnings.warn(
+                f"No frequencies found in UAF band {self.uaf_band}",
+                RuntimeWarning
             )
-            
-            if np.any(band_mask):
-                uaf_power = np.mean(psd[band_mask])
-                uaf_values.append(uaf_power)
-        
-        return np.array(uaf_values)
+            return np.array([])
+
+        # Compute mean power in UAF band for each time window
+        uaf_values = np.mean(Sxx[band_mask, :], axis=0)
+
+        return uaf_values
     
     def get_paf(self) -> Optional[float]:
         """
