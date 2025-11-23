@@ -1,20 +1,19 @@
 """
-Main script for running neurofeedback simulation.
+Core script for running neurofeedback simulations with different NFT protocols.
 
-This script runs the complete Davelaar (2018) Simulation Study 1 and generates
-visualizations matching Figures 4 and 5 from the paper.
-
-Usage:
-    python run_simulation.py [--seed SEED] [--output OUTPUT_DIR]
-
-Author: Generated from specification
+This module exposes a programmatic entry point (`run_simulation`) that can be
+reused by protocol-specific launchers (e.g., protocol_zoefel_2011.py) and a CLI
+for ad-hoc runs. Results are written to timestamped folders under
+`results/{protocol}/`.
 """
 
 import argparse
-import numpy as np
-import matplotlib.pyplot as plt
+from datetime import datetime
 from pathlib import Path
-import os
+from typing import Dict, Tuple, Union
+
+import matplotlib.pyplot as plt
+import numpy as np
 from scipy import stats
 
 from modules.NeurofeedbackSimulation import NeurofeedbackSimulation
@@ -253,9 +252,24 @@ def create_visualizations(results: dict, output_dir: Path = Path('.')) -> None:
     plt.close()
 
 
-def save_results(results: dict, output_dir: Path = Path('.')) -> None:
+def save_eeg_signals(results: Dict, output_dir: Path) -> Path:
+    """Persist raw EEG signals first so critical data is saved even if later steps fail."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    eeg_path = output_dir / 'eeg_signals.npz'
+    np.savez_compressed(
+        eeg_path,
+        baseline=results['baseline_eeg'],
+        training=results['training_eeg'],
+        post=results['post_eeg']
+    )
+    print(f"EEG signals saved to: {eeg_path}")
+    return eeg_path
+
+
+def save_results(results: Dict, output_dir: Path = Path('.')) -> Tuple[Path, Path]:
     """
-    Save simulation results to files.
+    Save simulation results to files. EEG signals should already be saved separately.
     
     Args:
         results: Dictionary containing simulation results
@@ -264,7 +278,7 @@ def save_results(results: dict, output_dir: Path = Path('.')) -> None:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Save NumPy archive
+    # Save full NumPy archive
     npz_path = output_dir / 'results.npz'
     np.savez_compressed(npz_path, **results)
     print(f"Results saved to: {npz_path}")
@@ -274,12 +288,68 @@ def save_results(results: dict, output_dir: Path = Path('.')) -> None:
     target_probs = results['target_prob_history']
     np.savetxt(csv_path, target_probs, delimiter=',', header='target_probability', comments='')
     print(f"Learning curve saved to: {csv_path}")
+    
+    return npz_path, csv_path
 
 
-def main():
-    """Main function to run simulation."""
+def build_output_dir(protocol_name: str, output_root: Path = Path('results')) -> Path:
+    """Create a timestamped output directory for a protocol."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_dir = Path(output_root) / protocol_name / timestamp
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir
+
+
+def run_simulation(
+    protocol_name: str,
+    seed: int = 42,
+    output_root: Union[Path, str] = Path('results'),
+    baseline_duration: float = 5 * 60,
+    training_duration: float = 5 * 60,
+    n_training_phases: int = 5,
+    post_duration: float = 5 * 60,
+    update_interval: float = 0.1,
+    warmup_duration: float = 1.0,
+    feedback_threshold_offset: float = 0.5,
+    verbose: bool = True
+) -> Tuple[Dict, Path]:
+    """
+    Run the neurofeedback simulation for a given protocol and persist results.
+    
+    Returns:
+        (results_dict, output_dir) where output_dir is the timestamped results folder.
+    """
+    output_dir = build_output_dir(protocol_name, Path(output_root))
+    print(f"Results will be saved to: {output_dir.absolute()}")
+    
+    simulation = NeurofeedbackSimulation(random_seed=seed)
+    results = simulation.run_training_protocol(
+        baseline_duration=baseline_duration,
+        training_duration=training_duration,
+        n_training_phases=n_training_phases,
+        post_duration=post_duration,
+        update_interval=update_interval,
+        warmup_duration=warmup_duration,
+        feedback_threshold_offset=feedback_threshold_offset,
+        verbose=verbose
+    )
+    
+    save_eeg_signals(results, output_dir)
+    save_results(results, output_dir=output_dir)
+    create_visualizations(results, output_dir=output_dir)
+    
+    return results, output_dir
+
+
+def parse_args() -> argparse.Namespace:
+    """CLI argument parser for the core simulation runner."""
     parser = argparse.ArgumentParser(
-        description='Run Davelaar (2018) Simulation Study 1'
+        description='Run neurofeedback simulation with a specified protocol'
+    )
+    parser.add_argument(
+        '--protocol',
+        required=True,
+        help='Protocol identifier used for naming the results folder (e.g., zoefel_2011)'
     )
     parser.add_argument(
         '--seed',
@@ -288,10 +358,11 @@ def main():
         help='Random seed for reproducibility (default: 42)'
     )
     parser.add_argument(
-        '--output',
+        '--output-root', '--output',
+        dest='output_root',
         type=str,
         default='results',
-        help='Output directory for results (default: results/)'
+        help='Root directory for results (default: results/)'
     )
     parser.add_argument(
         '--baseline-duration',
@@ -335,20 +406,16 @@ def main():
         default=0.5,
         help='Feedback threshold offset in std units (baseline_mean + offset*std, default: 0.5)'
     )
-    
-    args = parser.parse_args()
-    
-    # Create output directory (default: results/)
-    output_dir = Path(args.output)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    print(f"Results will be saved to: {output_dir.absolute()}")
-    
-    # Initialize simulation
-    simulation = NeurofeedbackSimulation(random_seed=args.seed)
-    
-    # Run training protocol
-    results = simulation.run_training_protocol(
+    return parser.parse_args()
+
+
+def main():
+    """Main function to run simulation from CLI."""
+    args = parse_args()
+    run_simulation(
+        protocol_name=args.protocol,
+        seed=args.seed,
+        output_root=args.output_root,
         baseline_duration=args.baseline_duration,
         training_duration=args.training_duration,
         n_training_phases=args.n_training_phases,
@@ -358,16 +425,8 @@ def main():
         feedback_threshold_offset=args.feedback_threshold_offset,
         verbose=True
     )
-    
-    # Create visualizations
-    create_visualizations(results, output_dir=output_dir)
-    
-    # Save results
-    save_results(results, output_dir=output_dir)
-    
     print("\nSimulation complete!")
 
 
 if __name__ == '__main__':
     main()
-
